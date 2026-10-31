@@ -45,27 +45,50 @@ get_multiline_input() {
     rm -f "$temp_file"
 }
 
-# View pending money and personal info
+# View pending money and log payments
 view_pending() {
     clear
     echo "--- Pending Money ---"
     
-    # Extract pending accounts and format for fzf
+    # Calculate remaining balance on the fly (handles older records without amount_paid)
     local selected
-    selected=$(jq -r '.accounts[] | select(.status=="pending") | "\(.name) | ₹\(.amount) | Due: \(.due_date) | Info: \(.info | gsub("\n"; " ")) | ID: \(.id)"' "$DATA_FILE" | \
-        fzf --prompt="Search records > " --layout=reverse --header="Select a record to mark as PAID or ESC to cancel")
+    selected=$(jq -r '.accounts[] | select(.status=="pending") | 
+        "\(.name) | Total: ₹\(.amount) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
+        fzf --prompt="Search records > " --layout=reverse --header="Select a record to log a payment or ESC to cancel")
 
     if [ -n "$selected" ]; then
-        # Extract ID from the selected string
         local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}')
         
-        read -p "Mark this record (ID: $record_id) as paid? (y/n): " confirm
-        if [[ "$confirm" == "y" ]]; then
-            jq --arg id "$record_id" '(.accounts[] | select(.id == $id) | .status) = "paid"' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
-            echo "Record marked as paid."
-	    auto_sync_background
-            sleep 1
+        # Fetch current totals
+        local current_amount=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .amount' "$DATA_FILE")
+        local current_paid=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | (.amount_paid // 0)' "$DATA_FILE")
+        local remaining=$((current_amount - current_paid))
+        
+        echo "Remaining balance for this record: ₹$remaining"
+        read -p "Enter payment amount (Leave blank for full ₹$remaining): ₹" payment_input
+        
+        # Default to full remaining amount if left blank
+        local payment=0
+        if [[ -z "$payment_input" ]]; then
+            payment=$remaining
+        else
+            payment=$payment_input
         fi
+        
+        local new_paid=$((current_paid + payment))
+        
+        if [[ $new_paid -ge $current_amount ]]; then
+            # Mark fully paid
+            jq --arg id "$record_id" --argjson paid "$new_paid" '(.accounts[] | select(.id == $id)) |= (.amount_paid = $paid | .status = "paid")' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
+            echo "Payment logged. Record fully paid!"
+        else
+            # Partial payment
+            jq --arg id "$record_id" --argjson paid "$new_paid" '(.accounts[] | select(.id == $id)) |= (.amount_paid = $paid)' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
+            echo "Partial payment of ₹$payment logged. Remaining: ₹$((current_amount - new_paid))."
+        fi
+        
+        auto_sync_background
+        sleep 1.5
     fi
 }
 
@@ -76,14 +99,16 @@ add_record() {
     read -p "Name: " name
     read -p "Amount (₹): " amount
     read -p "Due Date (YYYY-MM-DD): " due_date
-   
+    
     echo "Opening editor for Personal Info (Save and Exit when done)..."
     sleep 1
-    local info=$(get_multiline_input) 
-    local id=$(date +%s) # Unique ID based on timestamp
+    local info=$(get_multiline_input)
     
+    local id=$(date +%s)
+    
+    # Added "amount_paid": 0
     jq --arg id "$id" --arg name "$name" --arg amount "$amount" --arg date "$due_date" --arg info "$info" \
-    '.accounts += [{"id": $id, "name": $name, "amount": $amount, "due_date": $date, "info": $info, "status": "pending"}]' \
+    '.accounts += [{"id": $id, "name": $name, "amount": $amount, "amount_paid": 0, "due_date": $date, "info": $info, "status": "pending"}]' \
     "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
     
     echo "Record added successfully."
@@ -305,7 +330,8 @@ view_past() {
     echo "--- Past (Paid) Transactions ---"
     
     local selected
-    selected=$(jq -r '.accounts[] | select(.status=="paid") | "\(.name) | ₹\(.amount) | Paid/Due: \(.due_date) | Info: \(.info | gsub("\n"; " ")) | ID: \(.id)"' "$DATA_FILE" | \
+    selected=$(jq -r '.accounts[] | select(.status=="paid") | 
+        "\(.name) | Total: ₹\(.amount) | Paid: ₹\(.amount_paid // .amount) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
         fzf --prompt="Search past records > " --layout=reverse --header="Select a record to REVERT to pending or ESC to cancel")
 
     if [ -n "$selected" ]; then
