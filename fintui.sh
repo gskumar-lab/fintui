@@ -32,6 +32,29 @@ init_app() {
     fi
 }
 
+# --- UI & Styling ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Set a unified fzf theme with borders and distinct colors
+export FZF_DEFAULT_OPTS="
+  --layout=reverse
+  --border=rounded
+  --color=bg+:#282c34,bg:#1e2127,spinner:#e06c75,hl:#e5c07b
+  --color=fg:#abb2bf,header:#61afef,info:#c678dd,pointer:#c678dd
+  --color=marker:#98c379,fg+:#ffffff,prompt:#61afef,hl+:#e5c07b
+"
+
+# Helper for colored headers
+print_header() {
+    echo -e "${CYAN}${BOLD}=== $1 ===${NC}\n"
+}
+
 # Helper to capture multiline input using terminal editor
 get_multiline_input() {
     local temp_file=$(mktemp)
@@ -48,26 +71,27 @@ get_multiline_input() {
 # View pending money and log payments
 view_pending() {
     clear
-    echo "--- Pending Money ---"
+    print_header "Pending Money"
     
-    # Calculate remaining balance on the fly (handles older records without amount_paid)
     local selected
     selected=$(jq -r '.accounts[] | select(.status=="pending") | 
-        "\(.name) | Total: ₹\(.amount) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
-        fzf --prompt="Search records > " --layout=reverse --header="Select a record to log a payment or ESC to cancel")
+        "\(.name) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
+        column -t -s '|' | \
+        fzf --prompt="Search records > " \
+            --header="Select a record to log a payment or ESC to cancel" \
+            --preview="id=\$(echo {} | awk -F'ID: ' '{print \$2}' | tr -d ' '); jq -r --arg i \"\$id\" '.accounts[] | select(.id == \$i) | \"Name: \(.name)\nTotal: ₹\(.amount)\nPaid:  ₹\(.amount_paid // 0)\nDue:   \(.due_date)\n\nNotes:\n\(.info)\"' \"$DATA_FILE\"" \
+            --preview-window=right:40%:wrap)
 
     if [ -n "$selected" ]; then
-        local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}')
+        local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}' | tr -d ' ')
         
-        # Fetch current totals
         local current_amount=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .amount' "$DATA_FILE")
         local current_paid=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | (.amount_paid // 0)' "$DATA_FILE")
         local remaining=$((current_amount - current_paid))
         
-        echo "Remaining balance for this record: ₹$remaining"
+        echo -e "${YELLOW}Remaining balance: ₹$remaining${NC}"
         read -p "Enter payment amount (Leave blank for full ₹$remaining): ₹" payment_input
         
-        # Default to full remaining amount if left blank
         local payment=0
         if [[ -z "$payment_input" ]]; then
             payment=$remaining
@@ -78,13 +102,11 @@ view_pending() {
         local new_paid=$((current_paid + payment))
         
         if [[ $new_paid -ge $current_amount ]]; then
-            # Mark fully paid
             jq --arg id "$record_id" --argjson paid "$new_paid" '(.accounts[] | select(.id == $id)) |= (.amount_paid = $paid | .status = "paid")' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
-            echo "Payment logged. Record fully paid!"
+            echo -e "${GREEN}Payment logged. Record fully paid!${NC}"
         else
-            # Partial payment
             jq --arg id "$record_id" --argjson paid "$new_paid" '(.accounts[] | select(.id == $id)) |= (.amount_paid = $paid)' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
-            echo "Partial payment of ₹$payment logged. Remaining: ₹$((current_amount - new_paid))."
+            echo -e "${GREEN}Partial payment of ₹$payment logged. Remaining: ₹$((current_amount - new_paid)).${NC}"
         fi
         
         auto_sync_background
@@ -186,7 +208,7 @@ edit_record() {
 # Check reminders (Overdue or due in next 7 days)
 check_reminders() {
     clear
-    echo "--- Reminders ---"
+    print_header "Reminders"
     local today=$(date +%s)
     local seven_days=$((today + 604800))
     
@@ -194,15 +216,16 @@ check_reminders() {
         local due_date=$(echo "$row" | jq -r '.due_date')
         local name=$(echo "$row" | jq -r '.name')
         local amount=$(echo "$row" | jq -r '.amount')
+        local paid=$(echo "$row" | jq -r '(.amount_paid // 0)')
+        local remaining=$((amount - paid))
         
-        # Convert due_date to epoch for comparison
         local due_epoch=$(date -d "$due_date" +%s 2>/dev/null)
         
         if [[ -n "$due_epoch" ]]; then
             if [[ $due_epoch -lt $today ]]; then
-                echo "🚨 OVERDUE: $name owes ₹$amount (Due: $due_date)"
+                echo -e "${RED}🚨 OVERDUE: $name owes ₹$remaining (Due: $due_date)${NC}"
             elif [[ $due_epoch -le $seven_days ]]; then
-                echo "⚠️ UPCOMING: $name owes ₹$amount (Due: $due_date)"
+                echo -e "${YELLOW}⚠️ UPCOMING: $name owes ₹$remaining (Due: $due_date)${NC}"
             fi
         fi
     done
@@ -375,27 +398,29 @@ delete_record() {
 show_dashboard() {
     clear
     
-    # Calculate totals
     local total_pending=$(jq '[.accounts[] | select(.status=="pending") | (.amount|tonumber) - (.amount_paid // 0 | tonumber)] | add // 0' "$DATA_FILE")
     local count_pending=$(jq '[.accounts[] | select(.status=="pending")] | length' "$DATA_FILE")
     
     local sort_choice=$(printf "1. Sort by Due Date (Closest first)\n2. Sort by Remaining Amount (Highest first)\n3. Sort by Name (A-Z)\n4. Cancel" | \
-        fzf --prompt="Sort Dashboard By > " --layout=reverse --height=40% --header="Dashboard: ₹${total_pending} pending from ${count_pending} records.")
+        fzf --prompt="Sort Dashboard By > " --header="Dashboard: ₹${total_pending} pending from ${count_pending} records.")
         
     local jq_sort=""
     case "$sort_choice" in
-        1*) jq_sort='sort_by(.due_date)' ;;
-        2*) jq_sort='sort_by((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | reverse' ;;
-        3*) jq_sort='sort_by(.name)' ;;
+        "1."*) jq_sort='sort_by(.due_date)' ;;
+        "2."*) jq_sort='sort_by((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | reverse' ;;
+        "3."*) jq_sort='sort_by(.name)' ;;
         *) return ;;
     esac
     
-    # Display the sorted, formatted table (using column -t for alignment)
     clear
     jq -r ".accounts | map(select(.status==\"pending\")) | $jq_sort | .[] | 
-        \"\(.name) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Total: ₹\(.amount) | Due: \(.due_date)\"" "$DATA_FILE" | \
+        \"\(.name) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)\"" "$DATA_FILE" | \
         column -t -s '|' | \
-        fzf --prompt="Press ESC to return > " --layout=reverse --header="💰 Total Pending: ₹${total_pending}" --info=hidden --bind "enter:abort"
+        fzf --prompt="Press ESC to return > " \
+            --header="💰 Total Pending: ₹${total_pending}" \
+            --preview="id=\$(echo {} | awk -F'ID: ' '{print \$2}' | tr -d ' '); jq -r --arg i \"\$id\" '.accounts[] | select(.id == \$i) | \"Notes:\n\(.info)\"' \"$DATA_FILE\"" \
+            --preview-window=down:30%:wrap \
+            --bind "enter:abort"
 }
 
 # Send WhatsApp Reminder
