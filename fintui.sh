@@ -6,7 +6,7 @@ DATA_FILE="$DATA_DIR/data.json"
 REMOTE_REPO_URL="" # Add your Git remote URL here
 
 # Ensure dependencies are installed
-for cmd in fzf jq git; do
+for cmd in fzf jq git notify-send; do
     if ! command -v $cmd &> /dev/null; then
         echo "Error: $cmd is not installed."
         exit 1
@@ -63,6 +63,7 @@ view_pending() {
         if [[ "$confirm" == "y" ]]; then
             jq --arg id "$record_id" '(.accounts[] | select(.id == $id) | .status) = "paid"' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
             echo "Record marked as paid."
+	    auto_sync_background
             sleep 1
         fi
     fi
@@ -86,6 +87,7 @@ add_record() {
     "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
     
     echo "Record added successfully."
+    auto_sync_background
     sleep 1
 }
 
@@ -149,6 +151,7 @@ edit_record() {
         jq --arg id "$record_id" --arg val "$new_val" --arg field "$field" \
         '(.accounts[] | select(.id == $id))[$field] = $val' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
         echo "Record updated successfully."
+	auto_sync_background
     else
         echo "Edit cancelled."
     fi
@@ -256,6 +259,44 @@ sync_git() {
     
     echo ""
     read -p "Press Enter to continue..."
+}
+
+# Background Autosync with Notifications
+auto_sync_background() {
+    # Run inside a subshell to avoid changing the main script's working directory
+    (
+        cd "$DATA_DIR" || exit
+        
+        # Abort if no remote is configured yet
+        if ! git remote | grep -q '^origin$'; then
+            exit 0
+        fi
+
+        # Check if there are actually changes to sync
+        if git diff --quiet data.json && git diff --cached --quiet data.json; then
+            exit 0
+        fi
+
+        # Commit local changes silently
+        git add data.json
+        git commit -m "Autosync: $(date '+%Y-%m-%d %H:%M:%S')" > /dev/null 2>&1
+
+        local branch
+        branch=$(git rev-parse --abbrev-ref HEAD)
+
+        # Attempt silent pull
+        if git pull origin "$branch" --no-edit > /dev/null 2>&1; then
+            # Attempt silent push
+            if git push -u origin "$branch" > /dev/null 2>&1; then
+                notify-send "FinTUI" "✅ Cloud sync complete" -t 3000
+            else
+                notify-send "FinTUI Error" "❌ Git push failed. Check network." -u critical
+            fi
+        else
+            # If pull fails, it's likely a merge conflict.
+            notify-send "FinTUI Alert" "⚠️ Merge conflict detected! Please run Manual Sync." -u critical
+        fi
+    ) & # The '&' ensures this block runs in the background
 }
 
 # Main Loop
