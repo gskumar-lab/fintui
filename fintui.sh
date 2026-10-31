@@ -299,20 +299,70 @@ auto_sync_background() {
     ) & # The '&' ensures this block runs in the background
 }
 
+# View past (paid) transactions and allow reverting to pending
+view_past() {
+    clear
+    echo "--- Past (Paid) Transactions ---"
+    
+    local selected
+    selected=$(jq -r '.accounts[] | select(.status=="paid") | "\(.name) | ₹\(.amount) | Paid/Due: \(.due_date) | Info: \(.info | gsub("\n"; " ")) | ID: \(.id)"' "$DATA_FILE" | \
+        fzf --prompt="Search past records > " --layout=reverse --header="Select a record to REVERT to pending or ESC to cancel")
+
+    if [ -n "$selected" ]; then
+        local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}')
+        
+        read -p "Revert this record (ID: $record_id) back to pending? (y/n): " confirm
+        if [[ "$confirm" == "y" ]]; then
+            jq --arg id "$record_id" '(.accounts[] | select(.id == $id) | .status) = "pending"' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
+            echo "Record reverted to pending."
+            auto_sync_background
+            sleep 1
+        fi
+    fi
+}
+
+# Delete any record (pending or paid) permanently
+delete_record() {
+    clear
+    echo "--- Delete Record ---"
+    
+    # Shows both pending and paid records, prefixed with their status
+    local selected
+    selected=$(jq -r '.accounts[] | "[\(.status | ascii_upcase)] \(.name) | ₹\(.amount) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
+        fzf --prompt="Select record to DELETE > " --layout=reverse --header="WARNING: This action is permanent!")
+
+    if [ -n "$selected" ]; then
+        local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}')
+        
+        read -p "Are you sure you want to PERMANENTLY DELETE this record? (y/n): " confirm
+        if [[ "$confirm" == "y" ]]; then
+            # map(select()) is the safest way to remove an object from a JSON array without leaving nulls
+            jq --arg id "$record_id" '.accounts |= map(select(.id != $id))' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
+            echo "Record deleted successfully."
+            auto_sync_background
+            sleep 1
+        fi
+    fi
+}
+
 # Main Loop
 init_app
 
 while true; do
     clear
-    choice=$(printf "1. View Pending Money\n2. Add New Record\n3. Edit Record\n4. Check Reminders\n5. Sync with Git\n6. Exit" | \
-        fzf --prompt="Main Menu > " --layout=reverse --height=40%)
+    choice=$(printf "1. View Pending Money\n2. View Past (Paid) Money\n3. Add New Record\n4. Edit Record\n5. Delete Record\n6. Check Reminders\n7. Manual Git Sync\n8. Exit" | \
+        fzf --prompt="Main Menu > " --layout=reverse --height=50%)
     
     case "$choice" in
         1*) view_pending ;;
-        2*) add_record ;;
-        3*) edit_record ;;
-        4*) check_reminders ;;
-        5*) sync_git ;;
-        6*) exit 0 ;;
+	2*) view_past ;;
+        3*) add_record ;;
+        4*) edit_record ;;
+        5*) delete_record ;;
+        6*) check_reminders ;;
+        7*) sync_git ;;
+        8*) exit 0 ;;
     esac
 done
+
+
