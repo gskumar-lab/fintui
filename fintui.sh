@@ -371,23 +371,57 @@ delete_record() {
     fi
 }
 
+# Summary Dashboard with Sorting
+show_dashboard() {
+    clear
+    
+    # Calculate totals
+    local total_pending=$(jq '[.accounts[] | select(.status=="pending") | (.amount|tonumber) - (.amount_paid // 0 | tonumber)] | add // 0' "$DATA_FILE")
+    local count_pending=$(jq '[.accounts[] | select(.status=="pending")] | length' "$DATA_FILE")
+    
+    local sort_choice=$(printf "1. Sort by Due Date (Closest first)\n2. Sort by Remaining Amount (Highest first)\n3. Sort by Name (A-Z)\n4. Cancel" | \
+        fzf --prompt="Sort Dashboard By > " --layout=reverse --height=40% --header="Dashboard: ₹${total_pending} pending from ${count_pending} records.")
+        
+    local jq_sort=""
+    case "$sort_choice" in
+        1*) jq_sort='sort_by(.due_date)' ;;
+        2*) jq_sort='sort_by((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | reverse' ;;
+        3*) jq_sort='sort_by(.name)' ;;
+        *) return ;;
+    esac
+    
+    # Display the sorted, formatted table (using column -t for alignment)
+    clear
+    jq -r ".accounts | map(select(.status==\"pending\")) | $jq_sort | .[] | 
+        \"\(.name) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Total: ₹\(.amount) | Due: \(.due_date)\"" "$DATA_FILE" | \
+        column -t -s '|' | \
+        fzf --prompt="Press ESC to return > " --layout=reverse --header="💰 Total Pending: ₹${total_pending}" --info=hidden --bind "enter:abort"
+}
+
 # Main Loop
 init_app
 
 while true; do
     clear
-    choice=$(printf "1. View Pending Money\n2. View Past (Paid) Money\n3. Add New Record\n4. Edit Record\n5. Delete Record\n6. Check Reminders\n7. Manual Git Sync\n8. Exit" | \
-        fzf --prompt="Main Menu > " --layout=reverse --height=50%)
+    # Calculate live totals for the main menu header
+    total_pending=$(jq '[.accounts[] | select(.status=="pending") | (.amount|tonumber) - (.amount_paid // 0 | tonumber)] | add // 0' "$DATA_FILE")
+    count_pending=$(jq '[.accounts[] | select(.status=="pending")] | length' "$DATA_FILE")
+    
+    header_text="💰 OVERALL PENDING: ₹${total_pending} across ${count_pending} active records"
+    
+    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Pending Money (Log Payments)\n3. View Past (Paid) Money\n4. Add New Record\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Manual Git Sync\n9. Exit" | \
+        fzf --prompt="Main Menu > " --layout=reverse --height=60% --header="$header_text")
     
     case "$choice" in
-        1*) view_pending ;;
-	2*) view_past ;;
-        3*) add_record ;;
-        4*) edit_record ;;
-        5*) delete_record ;;
-        6*) check_reminders ;;
-        7*) sync_git ;;
-        8*) exit 0 ;;
+        1*) show_dashboard ;;
+        2*) view_pending ;;
+        3*) view_past ;;
+        4*) add_record ;;
+        5*) edit_record ;;
+        6*) delete_record ;;
+        7*) check_reminders ;;
+        8*) sync_git ;;
+        9*) exit 0 ;;
     esac
 done
 
