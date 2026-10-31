@@ -398,19 +398,84 @@ show_dashboard() {
         fzf --prompt="Press ESC to return > " --layout=reverse --header="💰 Total Pending: ₹${total_pending}" --info=hidden --bind "enter:abort"
 }
 
+# Send WhatsApp Reminder
+send_whatsapp() {
+    clear
+    echo "--- Send WhatsApp Reminder ---"
+    
+    local selected
+    selected=$(jq -r '.accounts[] | select(.status=="pending") | 
+        "\(.name) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
+        fzf --prompt="Select record > " --layout=reverse --header="Select a person to send a reminder")
+
+    if [ -n "$selected" ]; then
+        local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}')
+        
+        # Fetch current details including info
+        local name=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .name' "$DATA_FILE")
+        local total=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .amount' "$DATA_FILE")
+        local paid=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | (.amount_paid // 0)' "$DATA_FILE")
+        local due_date=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .due_date' "$DATA_FILE")
+        local info=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .info' "$DATA_FILE")
+        local remaining=$((total - paid))
+        
+        clear
+        echo "--- Info on file for $name ---"
+        echo "$info"
+        echo "-------------------------------"
+        
+        # Try to automatically extract a phone number from the info field (10-12 digits)
+        local auto_phone=$(echo "$info" | grep -oE '\+?[0-9]{10,12}' | head -n 1 | tr -d '+')
+        
+        local phone=""
+        if [[ -n "$auto_phone" ]]; then
+            read -p "Enter WhatsApp number [$auto_phone]: " phone
+            [[ -z "$phone" ]] && phone="$auto_phone"
+        else
+            read -p "Enter WhatsApp number (e.g., 919876543210): " phone
+        fi
+        
+        if [[ -z "$phone" ]]; then
+            echo "Number cannot be empty. Cancelled."
+            sleep 1
+            return
+        fi
+        
+        # Clean up the number just in case
+        phone=$(echo "$phone" | tr -d ' +' )
+        
+        # Draft the message
+        local msg="Hi $name, this is a gentle reminder regarding the pending amount of ₹$remaining. (Total was ₹$total, due on $due_date). Please let me know when you can process this. Thanks!"
+        
+        # URL encode the message using jq
+        local encoded_msg=$(jq -nr --arg v "$msg" '$v|@uri')
+        local url="https://wa.me/${phone}?text=${encoded_msg}"
+        
+        echo "Opening WhatsApp..."
+        if command -v xdg-open &> /dev/null; then
+            xdg-open "$url" > /dev/null 2>&1
+        elif command -v open &> /dev/null; then
+            open "$url" > /dev/null 2>&1
+        else
+            echo "Could not launch browser automatically. Open this link:"
+            echo "$url"
+            read -p "Press Enter to return..."
+        fi
+    fi
+}
+
 # Main Loop
 init_app
 
 while true; do
     clear
-    # Calculate live totals for the main menu header
     total_pending=$(jq '[.accounts[] | select(.status=="pending") | (.amount|tonumber) - (.amount_paid // 0 | tonumber)] | add // 0' "$DATA_FILE")
     count_pending=$(jq '[.accounts[] | select(.status=="pending")] | length' "$DATA_FILE")
     
     header_text="💰 OVERALL PENDING: ₹${total_pending} across ${count_pending} active records"
     
-    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Pending Money (Log Payments)\n3. View Past (Paid) Money\n4. Add New Record\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Manual Git Sync\n9. Exit" | \
-        fzf --prompt="Main Menu > " --layout=reverse --height=60% --header="$header_text")
+    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Pending Money (Log Payments)\n3. View Past (Paid) Money\n4. Add New Record\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Send WhatsApp Reminder\n9. Manual Git Sync\n0. Exit" | \
+        fzf --prompt="Main Menu > " --layout=reverse --height=65% --header="$header_text")
     
     case "$choice" in
         1*) show_dashboard ;;
@@ -420,8 +485,9 @@ while true; do
         5*) edit_record ;;
         6*) delete_record ;;
         7*) check_reminders ;;
-        8*) sync_git ;;
-        9*) exit 0 ;;
+        8*) send_whatsapp ;;
+        9*) sync_git ;;
+        0*) exit 0 ;;
     esac
 done
 
