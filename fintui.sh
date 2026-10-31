@@ -182,23 +182,79 @@ check_reminders() {
     read -p "Press Enter to return to menu..."
 }
 
-# Sync with Git Remote
+# Interactive Git Sync with Edge Case Handling
 sync_git() {
     clear
-    echo "--- Syncing with Remote ---"
+    echo "--- Interactive Git Sync ---"
     cd "$DATA_DIR" || exit
     
-    if git pull origin main 2>/dev/null; then
-        echo "Pulled latest changes."
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD)
+
+    # Edge Case 1: No remote configured dynamically
+    if ! git remote | grep -q '^origin$'; then
+        echo "No remote repository configured."
+        read -p "Enter remote Git URL (or press Enter to abort): " new_remote
+        if [[ -z "$new_remote" ]]; then
+            return
+        fi
+        git remote add origin "$new_remote"
+    fi
+
+    # Edge Case 2: Commit local changes BEFORE pulling to avoid overwrites
+    if ! git diff --quiet data.json || ! git diff --cached --quiet data.json; then
+        echo "Local changes detected."
+        git add data.json
+        read -p "Enter commit message [Auto-sync]: " msg
+        [[ -z "$msg" ]] && msg="Auto-sync: $(date '+%Y-%m-%d %H:%M:%S')"
+        git commit -m "$msg"
     else
-        echo "No remote found or pull failed."
+        echo "No local changes to commit."
+    fi
+
+    # Edge Case 3: Pulling with Interactive Merge Conflict Handling
+    echo "Pulling from remote..."
+    # --no-edit prevents vim opening automatically for standard merge commits
+    if ! git pull origin "$branch" --no-edit 2>/dev/null; then
+        # Check if it actually failed due to a conflict
+        if git ls-files -u | grep -q 'data.json'; then
+            echo "⚠️ MERGE CONFLICT DETECTED in data.json!"
+            local resolve_choice
+            resolve_choice=$(printf "1. Keep Local Data\n2. Keep Remote Data\n3. Abort Sync (Fix manually)" | \
+                fzf --prompt="Resolve Conflict > " --layout=reverse --height=30%)
+            
+            case "$resolve_choice" in
+                1*)
+                    git checkout --ours data.json
+                    git add data.json
+                    git commit -m "Conflict resolved: kept local data"
+                    ;;
+                2*)
+                    git checkout --theirs data.json
+                    git add data.json
+                    git commit -m "Conflict resolved: kept remote data"
+                    ;;
+                *)
+                    git merge --abort
+                    echo "Sync aborted. Data is safe but out of sync."
+                    read -p "Press Enter to return to menu..."
+                    return
+                    ;;
+            esac
+        else
+            echo "Pull failed (Remote might be empty or unreachable, proceeding to push)."
+        fi
+    fi
+
+    # Edge Case 4: Pushing with upstream tracking for first-time pushes
+    echo "Pushing to remote..."
+    if git push -u origin "$branch"; then
+        echo "✅ Sync complete!"
+    else
+        echo "❌ Push failed. Check your network or credentials."
     fi
     
-    git add data.json
-    git commit -m "Auto-sync: $(date '+%Y-%m-%d %H:%M:%S')"
-    git push origin main
-    
-    echo "Sync complete."
+    echo ""
     read -p "Press Enter to continue..."
 }
 
