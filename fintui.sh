@@ -20,7 +20,6 @@ init_app() {
         cd "$DATA_DIR" || exit
         git init
         
-        # Initialize JSON skeleton
         echo '{"accounts": []}' > "$DATA_FILE"
         
         if [ -n "$REMOTE_REPO_URL" ]; then
@@ -30,6 +29,12 @@ init_app() {
         git add data.json
         git commit -m "Initial commit"
     fi
+    
+    # Auto-migrate: Remove account-level 'type', and add 'type' to individual payments
+    jq '.accounts |= map(
+        del(.type) | 
+        .payments = (.payments // [] | map(.type = (.type // "accept")))
+    )' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
 }
 
 # --- UI & Styling ---
@@ -68,45 +73,74 @@ get_multiline_input() {
     rm -f "$temp_file"
 }
 
-# View pending money and log payments
+# View pending money and log transactions
 view_pending() {
     clear
-    print_header "Pending Money"
+    print_header "Pending Ledger Accounts"
     
     local selected
     selected=$(jq -r '.accounts[] | select(.status=="pending") | 
-        "\(.name) | Remaining: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
+        "\(.name) | Balance: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | Due: \(.due_date) | ID: \(.id)"' "$DATA_FILE" | \
         column -t -s '|' | \
         fzf --prompt="Search records > " \
-            --header="Select a record to log a payment or ESC to cancel" \
-            --preview="id=\$(echo {} | awk -F'ID: ' '{print \$2}' | tr -d ' '); jq -r --arg i \"\$id\" '.accounts[] | select(.id == \$i) | \"Name: \(.name)\nTotal: ₹\(.amount)\nPaid:  ₹\(.amount_paid // 0)\nDue:   \(.due_date)\n\nNotes:\n\(.info)\"' \"$DATA_FILE\"" \
-            --preview-window=right:40%:wrap)
+            --header="Select an account to log a transaction or ESC to cancel" \
+            --preview="id=\$(echo {} | awk -F'ID: ' '{print \$2}' | tr -d ' '); jq -r --arg i \"\$id\" '.accounts[] | select(.id == \$i) | \"Name: \(.name)\nInitial Amount: ₹\(.amount)\nCurrent Balance: ₹\((.amount|tonumber) - (.amount_paid // 0 | tonumber))\nDue:   \(.due_date)\n\nLedger History:\n\(if (.payments | length) > 0 then (.payments[] | \"- \(.date): ₹\(.amount) [\(.type | ascii_upcase)] (\(.desc))\") else \"No transactions yet.\" end)\n\nNotes:\n\(.info)\"' \"$DATA_FILE\"" \
+            --preview-window=right:45%:wrap)
 
     if [ -n "$selected" ]; then
         local record_id=$(echo "$selected" | awk -F'ID: ' '{print $2}' | tr -d ' ')
         
         local current_amount=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | .amount' "$DATA_FILE")
         local current_paid=$(jq -r --arg id "$record_id" '.accounts[] | select(.id == $id) | (.amount_paid // 0)' "$DATA_FILE")
-        local remaining=$((current_amount - current_paid))
+        local balance=$((current_amount - current_paid))
         
-        echo -e "${YELLOW}Remaining balance: ₹$remaining${NC}"
-        read -p "Enter payment amount (Leave blank for full ₹$remaining): ₹" payment_input
+        echo -e "${YELLOW}Current Balance: ₹$balance (Positive = They owe you, Negative = You owe them)${NC}"
         
-        local payment=0
-        if [[ -z "$payment_input" ]]; then
-            payment=$remaining
+        local action=$(printf "1. Accept Money (Receive)\n2. Give Money (Pay)\n3. Cancel" | fzf --prompt="Transaction Type > " --layout=reverse --height=25%)
+        
+        local p_type=""
+        case "$action" in
+            1*) p_type="accept" ;;
+            2*) p_type="give" ;;
+            *) return ;;
+        esac
+        
+        read -p "Amount: ₹" payment_input
+        if [[ -z "$payment_input" || "$payment_input" == 0 ]]; then return; fi
+        local payment=$payment_input
+        
+        local default_date=$(date +%Y-%m-%d)
+        read -p "Date [$default_date]: " pay_date
+        pay_date=${pay_date:-$default_date}
+        
+        read -p "Description (e.g., UPI, Cash) [None]: " pay_desc
+        pay_desc=${pay_desc:-"None"}
+        
+        local new_paid=$current_paid
+        if [[ "$p_type" == "accept" ]]; then
+            new_paid=$((current_paid + payment))
         else
-            payment=$payment_input
+            new_paid=$((current_paid - payment))
         fi
         
-        local new_paid=$((current_paid + payment))
+        local new_balance=$((current_amount - new_paid))
+        local new_status="pending"
         
-        if [[ $new_paid -ge $current_amount ]]; then
-            jq --arg id "$record_id" --argjson paid "$new_paid" '(.accounts[] | select(.id == $id)) |= (.amount_paid = $paid | .status = "paid")' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
-            echo -e "${GREEN}Payment logged. Record fully paid!${NC}"
+        # Settle account if balance zeroes out exactly
+        [[ $new_balance -eq 0 ]] && new_status="paid"
+        
+        jq --arg id "$record_id" --argjson paid "$new_paid" --arg stat "$new_status" \
+           --arg p_date "$pay_date" --argjson p_amt "$payment" --arg p_desc "$pay_desc" --arg p_type "$p_type" \
+        '(.accounts[] | select(.id == $id)) |= (
+            .amount_paid = $paid | 
+            .status = $stat | 
+            .payments += [{"date": $p_date, "amount": $p_amt, "type": $p_type, "desc": $p_desc}]
+        )' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
+        
+        if [[ "$new_status" == "paid" ]]; then
+            echo -e "${GREEN}Transaction logged. Balance settled to zero!${NC}"
         else
-            jq --arg id "$record_id" --argjson paid "$new_paid" '(.accounts[] | select(.id == $id)) |= (.amount_paid = $paid)' "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
-            echo -e "${GREEN}Partial payment of ₹$payment logged. Remaining: ₹$((current_amount - new_paid)).${NC}"
+            echo -e "${GREEN}Transaction logged. New Balance: ₹$new_balance.${NC}"
         fi
         
         auto_sync_background
@@ -117,23 +151,23 @@ view_pending() {
 # Add a new record
 add_record() {
     clear
-    echo "--- Add New Pending Money ---"
+    print_header "Add New Ledger Account"
+    
     read -p "Name: " name
-    read -p "Amount (₹): " amount
+    read -p "Initial Amount (₹) [Positive = They owe you, Negative = You owe them]: " amount
     read -p "Due Date (YYYY-MM-DD): " due_date
     
-    echo "Opening editor for Personal Info (Save and Exit when done)..."
+    echo -e "\nOpening editor for Personal Info (Save and Exit when done)..."
     sleep 1
     local info=$(get_multiline_input)
     
     local id=$(date +%s)
     
-    # Added "amount_paid": 0
     jq --arg id "$id" --arg name "$name" --arg amount "$amount" --arg date "$due_date" --arg info "$info" \
-    '.accounts += [{"id": $id, "name": $name, "amount": $amount, "amount_paid": 0, "due_date": $date, "info": $info, "status": "pending"}]' \
+    '.accounts += [{"id": $id, "name": $name, "amount": $amount, "amount_paid": 0, "payments": [], "due_date": $date, "info": $info, "status": "pending"}]' \
     "$DATA_FILE" > "$DATA_FILE.tmp" && mv "$DATA_FILE.tmp" "$DATA_FILE"
     
-    echo "Record added successfully."
+    echo -e "${GREEN}Ledger record added successfully.${NC}"
     auto_sync_background
     sleep 1
 }
@@ -530,13 +564,17 @@ init_app
 
 while true; do
     clear
-    total_pending=$(jq '[.accounts[] | select(.status=="pending") | (.amount|tonumber) - (.amount_paid // 0 | tonumber)] | add // 0' "$DATA_FILE")
-    count_pending=$(jq '[.accounts[] | select(.status=="pending")] | length' "$DATA_FILE")
     
-    header_text="💰 OVERALL PENDING: ₹${total_pending} across ${count_pending} active records"
+    # Positive balances map to To Receive
+    to_receive=$(jq '[.accounts[] | select(.status=="pending") | ((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | select(. > 0)] | add // 0' "$DATA_FILE")
     
-    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Pending Money (Log Payments)\n3. View Past (Paid) Money\n4. Add New Record\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Send WhatsApp Reminder\n9. Manual Git Sync\n10. Export to CSV\n11. Exit" | \
-        fzf --prompt="Main Menu > " --layout=reverse --height=70% --header="$header_text")
+    # Negative balances map to To Pay (multiplied by -1 strictly for clean output)
+    to_pay=$(jq '[.accounts[] | select(.status=="pending") | ((.amount|tonumber) - (.amount_paid // 0 | tonumber)) | select(. < 0) | . * -1] | add // 0' "$DATA_FILE")
+    
+    header_text=$(echo -e "💰 TO RECEIVE: ${GREEN}₹${to_receive}${NC} | 💸 TO PAY: ${RED}₹${to_pay}${NC}")
+    
+    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Ledger Accounts (Log Transactions)\n3. View Settled (Paid) Accounts\n4. Add New Account\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Send WhatsApp Reminder\n9. Manual Git Sync\n10. Export to CSV\n11. Exit" | \
+        fzf --ansi --prompt="Main Menu > " --layout=reverse --height=70% --header="$header_text")
     
     case "$choice" in
         "1."*) show_dashboard ;;
