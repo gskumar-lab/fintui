@@ -464,6 +464,42 @@ send_whatsapp() {
     fi
 }
 
+# Export JSON data to CSV
+export_csv() {
+    clear
+    echo "--- Export Data to CSV ---"
+    
+    # Default filename with timestamp in the user's home directory
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local default_file="$HOME/fintui_export_$timestamp.csv"
+    
+    read -p "Enter file path to save [$default_file]: " export_path
+    [[ -z "$export_path" ]] && export_path="$default_file"
+    
+    # jq filter generates headers, then maps each account array into @csv format
+    jq -r '
+    ["ID", "Name", "Total Amount", "Amount Paid", "Remaining", "Due Date", "Status", "Info"],
+    (.accounts[] | [
+        .id, 
+        .name, 
+        .amount, 
+        (.amount_paid // 0), 
+        ((.amount|tonumber) - (.amount_paid // 0 | tonumber)), 
+        .due_date, 
+        .status, 
+        .info
+    ]) | @csv' "$DATA_FILE" > "$export_path"
+    
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Export successful! Saved to:"
+        echo "$export_path"
+    else
+        echo "❌ Export failed. Check folder permissions."
+    fi
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
 # Main Loop
 init_app
 
@@ -474,20 +510,21 @@ while true; do
     
     header_text="💰 OVERALL PENDING: ₹${total_pending} across ${count_pending} active records"
     
-    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Pending Money (Log Payments)\n3. View Past (Paid) Money\n4. Add New Record\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Send WhatsApp Reminder\n9. Manual Git Sync\n0. Exit" | \
-        fzf --prompt="Main Menu > " --layout=reverse --height=65% --header="$header_text")
+    choice=$(printf "1. Summary Dashboard (Sort & View)\n2. View Pending Money (Log Payments)\n3. View Past (Paid) Money\n4. Add New Record\n5. Edit Record\n6. Delete Record\n7. Check Reminders\n8. Send WhatsApp Reminder\n9. Manual Git Sync\n10. Export to CSV\n11. Exit" | \
+        fzf --prompt="Main Menu > " --layout=reverse --height=70% --header="$header_text")
     
     case "$choice" in
-        1*) show_dashboard ;;
-        2*) view_pending ;;
-        3*) view_past ;;
-        4*) add_record ;;
-        5*) edit_record ;;
-        6*) delete_record ;;
-        7*) check_reminders ;;
-        8*) send_whatsapp ;;
-        9*) sync_git ;;
-        0*) exit 0 ;;
+        "1."*) show_dashboard ;;
+        "2."*) view_pending ;;
+        "3."*) view_past ;;
+        "4."*) add_record ;;
+        "5."*) edit_record ;;
+        "6."*) delete_record ;;
+        "7."*) check_reminders ;;
+        "8."*) send_whatsapp ;;
+        "9."*) sync_git ;;
+        "10."*) export_csv ;;
+        "11."*) exit 0 ;;
     esac
 done
 
